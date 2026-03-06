@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.DS_Store
+.pytest_cache/
+checkpoints/
+runs/
+data/
+*.pt
+*.pth
+*.ckpt
+verify_mantissa.png

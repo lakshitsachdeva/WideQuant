@@ -1,0 +1,16 @@
+model:
+  encoder: bert-base-uncased
+  hidden_dim: 768
+  J_m: 691
+  J_e: 77
+
+training:
+  lr_bert: 2e-5
+  lr_heads: 1e-4
+  batch_size: 128
+  epochs: 8
+  temperature: 0.02
+  lambda_arith: 0.5
+
+index:
+  top_k: 100
