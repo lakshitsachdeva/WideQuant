@@ -45,6 +45,15 @@ from src.training.losses import TotalLoss
 class DeepQuantTrainer:
     """Trainer for DeepQuant with mixed precision, FAISS eval, and checkpointing."""
 
+    @staticmethod
+    def _select_device() -> torch.device:
+        """Select CUDA first, then Apple MPS, else CPU."""
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
     def __init__(
         self,
         model: nn.Module,
@@ -58,8 +67,9 @@ class DeepQuantTrainer:
         self.train_dataloader = train_dataloader
         self.dev_dataloader = dev_dataloader
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = self._select_device()
         self.model.to(self.device)
+        print(f"[DeepQuantTrainer] Using device: {self.device}")
 
         training_cfg = config.get("training", {})
         model_cfg = config.get("model", {})
@@ -95,7 +105,7 @@ class DeepQuantTrainer:
         self.bert_optimizer = AdamW(bert_params, lr=2e-5, weight_decay=0.01)
         self.head_optimizer = AdamW(non_bert_params, lr=1e-4, weight_decay=0.01)
 
-        self.use_amp = torch.cuda.is_available()
+        self.use_amp = self.device.type == "cuda"
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         self.loss_fn = TotalLoss(lambda_arith=float(training_cfg["lambda_arith"]))
         self.loss_fn.retr_loss.temperature = self.temperature
