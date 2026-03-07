@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_train_examples", type=int, default=None)
     parser.add_argument("--max_dev_examples", type=int, default=None)
     parser.add_argument("--rebuild_data", action="store_true")
+    parser.add_argument("--dry_run", action="store_true")
     return parser.parse_args()
 
 
@@ -189,6 +190,10 @@ def main() -> None:
     train_rows = _load_jsonl(data_dir / "train.jsonl")
     dev_rows = _load_jsonl(data_dir / "dev.jsonl")
 
+    if args.dry_run:
+        train_rows = _trim_examples(train_rows, 32)
+        dev_rows = _trim_examples(dev_rows, 32)
+
     train_rows = _trim_examples(train_rows, args.max_train_examples)
     dev_rows = _trim_examples(dev_rows, args.max_dev_examples)
 
@@ -210,6 +215,19 @@ def main() -> None:
         num_hard_negatives=n_hard_negatives,
     )
 
+    if not args.dry_run:
+        if len(train_dataset) < 1000:
+            raise ValueError(
+                f"Training set too small: {len(train_dataset)} examples. "
+                f"Run finquant_loader.py first to build full dataset. "
+                f"Expected > 5000 train triples."
+            )
+        if len(dev_dataset) < 100:
+            raise ValueError(
+                f"Dev set too small: {len(dev_dataset)} examples. "
+                f"MRR@10 on < 100 examples is statistically meaningless."
+            )
+
     train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True, collate_fn=_collate_identity)
     dev_dataloader = DataLoader(dev_dataset, batch_size=1, shuffle=False, collate_fn=_collate_identity)
 
@@ -220,11 +238,26 @@ def main() -> None:
         dev_dataloader=dev_dataloader,
     )
 
+    if args.dry_run:
+        print("DRY RUN — not a real training run, gate not evaluated")
+        train_losses = trainer.train_epoch(epoch=1)
+        dev_metrics = trainer.evaluate(dev_dataloader)
+        print(
+            f"Dry run epoch 1 | Train Loss: {train_losses.get('total', 0.0):.4f} | "
+            f"Dev MRR@10: {dev_metrics['MRR@10']:.4f}"
+        )
+        trainer.writer.flush()
+        trainer.writer.close()
+        return
+
     results = trainer.train(n_epochs=8)
     best_mrr10 = float(results["best_mrr10"])
     print(f"Final best MRR@10: {best_mrr10:.4f}")
+    print(f"Gate evaluated on {len(dev_dataset)} dev examples")
+    if len(dev_dataset) < 100:
+        print("WARNING: Gate passed on tiny dev set — result is not meaningful")
 
-    if best_mrr10 >= 0.70:
+    if len(dev_dataset) >= 100 and best_mrr10 >= 0.70:
         print("PHASE 2 COMPLETE. PROCEED TO PHASE 3")
     else:
         loss_curves = results.get("loss_curves", {})
