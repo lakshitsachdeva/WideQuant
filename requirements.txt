@@ -6,7 +6,7 @@ faiss-cpu; platform_system != "Linux"
 scikit-learn
 rank-bm25
 pint
-numpy
+numpy>=1.24.0,<2.0.0
 pandas
 tqdm
 pytest
