@@ -33,6 +33,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_dev_examples", type=int, default=None)
     parser.add_argument("--rebuild_data", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
+    parser.add_argument("--build_max_examples", type=int, default=None)
+    parser.add_argument("--build_skip_cqe", action="store_true")
+    parser.add_argument("--streaming_data", action="store_true")
+    parser.add_argument("--hf_cache_dir", type=str, default=None)
     return parser.parse_args()
 
 
@@ -56,7 +60,16 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _ensure_dataset_ready(data_dir: Path, seed: int, rebuild_data: bool, n_negatives: int) -> None:
+def _ensure_dataset_ready(
+    data_dir: Path,
+    seed: int,
+    rebuild_data: bool,
+    n_negatives: int,
+    build_max_examples: int | None,
+    build_skip_cqe: bool,
+    streaming_data: bool,
+    hf_cache_dir: str | None,
+) -> None:
     """Build retrieval triples if missing or incompatible with required negative count."""
     train_path = data_dir / "train.jsonl"
     dev_path = data_dir / "dev.jsonl"
@@ -76,6 +89,10 @@ def _ensure_dataset_ready(data_dir: Path, seed: int, rebuild_data: bool, n_negat
             output_dir=str(data_dir),
             seed=seed,
             n_negatives=n_negatives,
+            max_examples=build_max_examples,
+            skip_cqe=build_skip_cqe,
+            streaming=streaming_data,
+            cache_dir=hf_cache_dir,
         )
         print(f"Built splits: train={counts['train']} dev={counts['dev']} test={counts['test']}")
     else:
@@ -185,6 +202,10 @@ def main() -> None:
         seed=args.seed,
         rebuild_data=args.rebuild_data,
         n_negatives=n_hard_negatives,
+        build_max_examples=args.build_max_examples,
+        build_skip_cqe=args.build_skip_cqe,
+        streaming_data=args.streaming_data,
+        hf_cache_dir=args.hf_cache_dir,
     )
 
     train_rows = _load_jsonl(data_dir / "train.jsonl")
