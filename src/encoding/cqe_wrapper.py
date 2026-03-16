@@ -57,6 +57,18 @@ class QuantitySpan:
     end_char: int
 
 
+@dataclass(slots=True)
+class ResolvedCandidate:
+    """Container for one arithmetic-resolved quantity candidate."""
+
+    value: float
+    unit: str
+    mantissa: float
+    exponent: int
+    source_type: str
+    source_spans: list[QuantitySpan]
+
+
 class CQEWrapper:
     """Thin wrapper around CQE output for WideQuant-ready quantity spans."""
 
