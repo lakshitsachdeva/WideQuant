@@ -227,7 +227,7 @@ def _get_model_tokenizer(model: Any) -> Any:
     encoder_name = "bert-base-uncased"
     if hasattr(model, "config"):
         encoder_name = str(getattr(model, "config", {}).get("model", {}).get("encoder", encoder_name))
-    tokenizer, _ = setup_tokenizer(encoder_name=encoder_name)
+    tokenizer, _ = setup_tokenizer(model_name=encoder_name)
     return tokenizer
 
 

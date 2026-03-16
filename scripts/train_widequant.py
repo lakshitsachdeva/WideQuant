@@ -55,6 +55,7 @@ from src.models.deepquant import DeepQuant
 from src.models.widequant import WideQuant
 from src.training.losses import TotalLoss
 from src.training.trainer import DeepQuantTrainer
+from scripts.verify_num_injection import run_verification
 
 QUERY_SPAN_PATTERNS = {
     "atomic": [(re.compile(r"greater than (?P<value>\d+(?:\.\d+)?)g", flags=re.IGNORECASE), "g", "fat_g")],
@@ -815,6 +816,8 @@ def main() -> None:
         config = yaml.safe_load(handle)
     config.setdefault("model", {})
     config["model"].setdefault("local_files_only", False)
+
+    run_verification(config)
 
     data_dir = Path(args.data_dir)
     _ensure_dataset_ready(data_dir, build_if_missing=args.build_if_missing, build_n_products=args.build_n_products)

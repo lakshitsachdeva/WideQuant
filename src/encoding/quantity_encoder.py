@@ -40,6 +40,11 @@ class ExponentEmbedding(nn.Module):
         self.J_e = J_e
         self.embedding = nn.Embedding(num_classes, J_e)
 
+    @property
+    def weight(self) -> torch.Tensor:
+        """Expose the underlying embedding table for verification and optimization checks."""
+        return self.embedding.weight
+
     def forward(self, exponent: int) -> torch.Tensor:
         """Embed exponent after clipping to [-20, 20] and indexing with (e + 20)."""
         clipped = max(-20, min(20, int(exponent)))

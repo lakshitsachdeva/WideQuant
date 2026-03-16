@@ -14,34 +14,47 @@ from typing import Any, List, Sequence
 from transformers import BertTokenizer
 
 NUMBER_PATTERN = re.compile(r"(?<!\w)(?:\d+\.?\d*|\.\d+)(?!\w)")
+REGEX_NUM_REPLACEMENT_PATTERN = re.compile(
+    r"\b\d+(?:\.\d+)?(?:%|billion|million|thousand)?\b",
+    flags=re.IGNORECASE,
+)
 
 
 def setup_tokenizer(
-    encoder_name: str = "bert-base-uncased",
+    model_name: str = "bert-base-uncased",
     local_files_only: bool = False,
     cache_dir: str | None = None,
-    model: Any | None = None,
 ) -> tuple[BertTokenizer, int]:
-    """Create tokenizer with [num] as a true special token before any tokenization."""
+    """Create the canonical BERT tokenizer with [num] registered as a special token."""
     tokenizer = BertTokenizer.from_pretrained(
-        encoder_name,
+        model_name,
         local_files_only=local_files_only,
         cache_dir=cache_dir,
     )
-    tokenizer.add_special_tokens({"additional_special_tokens": ["[num]"]})
-
-    if model is not None:
-        model.resize_token_embeddings(len(tokenizer))
-
+    special_tokens = {"additional_special_tokens": ["[num]"]}
+    num_added = tokenizer.add_special_tokens(special_tokens)
     num_token_id = int(tokenizer.convert_tokens_to_ids("[num]"))
-    unk_token_id = int(tokenizer.unk_token_id if tokenizer.unk_token_id is not None else 100)
-    print(f"[setup_tokenizer] [num] token id: {num_token_id}")
-    if num_token_id == unk_token_id:
-        raise RuntimeError(
-            f"[num] mapped to [UNK] (id={unk_token_id}). "
-            "Tokenizer special-token setup failed."
-        )
+    assert num_token_id != 100, (
+        f"CRITICAL: [num] mapped to [UNK] id=100. "
+        f"Special token was not added correctly. num_added={num_added}"
+    )
+    assert num_token_id == len(tokenizer) - num_added or num_token_id > 30000, (
+        f"CRITICAL: [num] token id={num_token_id} looks wrong. "
+        f"Expected id > 30000 for a newly added special token."
+    )
     return tokenizer, num_token_id
+
+
+def replace_with_num_tokens_regex(text: str) -> str:
+    """Replace numeric mentions with [num] using a lightweight regex fallback."""
+    replaced = REGEX_NUM_REPLACEMENT_PATTERN.sub("[num]", text)
+    replaced = replaced.replace("[num]", " [num] ")
+    return re.sub(r"\s+", " ", replaced).strip()
+
+
+def no_numbers_in_text(text: str) -> bool:
+    """Return True when the text contains no numeric literals."""
+    return NUMBER_PATTERN.search(text) is None
 
 
 @dataclass(slots=True)
@@ -297,7 +310,7 @@ class CQEWrapper:
         """Replace quantity numeric spans with [num], keeping unit words untouched."""
         if not spans:
             # CQE can miss certain numeric mentions; keep [num] replacement robust.
-            return NUMBER_PATTERN.sub("[num]", text)
+            return replace_with_num_tokens_regex(text)
 
         ordered = sorted(spans, key=lambda span: span.start_char)
         parts: list[str] = []
@@ -321,8 +334,7 @@ class CQEWrapper:
         replaced = NUMBER_PATTERN.sub("[num]", replaced)
         # Keep [num] as a standalone token so tokenizer doesn't split/drop it.
         replaced = replaced.replace("[num]", " [num] ")
-        replaced = re.sub(r"\s+", " ", replaced).strip()
-        return replaced
+        return re.sub(r"\s+", " ", replaced).strip()
 
 
 if __name__ == "__main__":

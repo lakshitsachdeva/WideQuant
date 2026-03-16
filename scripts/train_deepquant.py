@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 from src.data.finquant_loader import build_and_save_splits
 from src.models.deepquant import DeepQuant
 from src.training.trainer import DeepQuantTrainer
+from scripts.verify_num_injection import run_verification
 
 
 def parse_args() -> argparse.Namespace:
@@ -199,6 +200,8 @@ def main() -> None:
     config["training"]["warmup_ratio"] = 0.10
     config["training"]["log_every_steps"] = 50
     config["training"]["epochs"] = int(config["training"].get("epochs", 8))
+
+    run_verification(config)
 
     data_dir = Path(args.data_dir)
     n_hard_negatives = 7

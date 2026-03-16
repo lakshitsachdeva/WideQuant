@@ -119,6 +119,8 @@ class DeepQuantTrainer:
         self.global_step = 0
         self.best_mrr10 = float("-inf")
         self._seen_hard_negatives = False
+        self._checked_first_num_batch = False
+        self._num_check_attempts = 0
         self._last_train_losses: dict[str, float] = {}
         self.bert_scheduler: Optional[LambdaLR] = None
         self.head_scheduler: Optional[LambdaLR] = None
@@ -314,11 +316,27 @@ class DeepQuantTrainer:
             doc_pos_batch = self._to_device(doc_pos_batch)
             doc_neg_batch = self._to_device(doc_neg_batch) if doc_neg_batch is not None else None
 
-            query_ids = query_batch["input_ids"]
-            if query_batch.get("quantity_spans"):
-                assert int(self.model.num_token_id) in query_ids.reshape(-1).tolist(), (
-                    f"[num] token {int(self.model.num_token_id)} not in batch — check tokenizer setup"
-                )
+            if not self._checked_first_num_batch:
+                num_id = int(self.model.num_token_id)
+                batch_query_ids = query_batch["input_ids"]
+                if batch_query_ids.ndim == 1:
+                    batch_query_ids = batch_query_ids.unsqueeze(0)
+                has_num_per_query = (batch_query_ids == num_id).any(dim=1)
+                frac_with_num = float(has_num_per_query.float().mean().item())
+                self._num_check_attempts += 1
+                if bool(has_num_per_query.any().item()):
+                    self._checked_first_num_batch = True
+                else:
+                    print(
+                        f"WARNING: Only {frac_with_num:.1%} of queries in batch contain "
+                        f"[num] token (id={num_id})"
+                    )
+                    if batch_query_ids.shape[0] > 1 or self._num_check_attempts >= 8:
+                        raise RuntimeError(
+                            "CRITICAL: Zero queries in the initial training batches contain [num] token. "
+                            "The injection pipeline is broken. Check setup_tokenizer() "
+                            "and replace_with_num_tokens() ordering."
+                        )
 
             if doc_neg_batch is not None:
                 pos_ids = doc_pos_batch.get("input_ids")

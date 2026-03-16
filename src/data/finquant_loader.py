@@ -25,12 +25,16 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.encoding.cqe_wrapper import CQEWrapper, QuantitySpan
+from src.encoding.cqe_wrapper import (
+    CQEWrapper,
+    QuantitySpan,
+    no_numbers_in_text,
+    replace_with_num_tokens_regex,
+)
 
 QUESTION_PATTERN = re.compile(r"Question:\s*(.*?)\s*Answer:", flags=re.IGNORECASE | re.DOTALL)
 CONTEXT_PATTERN = re.compile(r"Context:\s*(.*?)\s*Question:", flags=re.IGNORECASE | re.DOTALL)
 NUMBER_PATTERN = re.compile(r"(?<!\w)(?:\d+\.?\d*|\.\d+)(?!\w)")
-FAST_NUMBER_PATTERN = re.compile(r"\b\d+\.?\d*\b")
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?", flags=re.IGNORECASE)
 FINANCIAL_CONCEPT_KEYWORDS = {
     "revenue",
@@ -144,7 +148,7 @@ def _save_cache(cache: dict[str, list[dict[str, Any]]], cache_path: Path) -> Non
 
 def _fast_replace_numbers(text: str) -> str:
     """Replace numeric substrings using a simple regex fast path."""
-    return FAST_NUMBER_PATTERN.sub("[num]", text)
+    return replace_with_num_tokens_regex(text)
 
 
 def _extract_numbers_fallback(text: str) -> tuple[str, ...]:
@@ -454,6 +458,13 @@ def convert_split_to_triples(
             pos_spans = _extract_spans_with_cache(cqe, context, span_cache, cache_stats)
             query_text = cqe.replace_with_num_tokens(question, query_spans)
             pos_doc_text = cqe.replace_with_num_tokens(context, pos_spans)
+
+        assert "[num]" in query_text or no_numbers_in_text(question), (
+            f"replace_with_num_tokens failed on query: {question[:100]}"
+        )
+        assert "[num]" in pos_doc_text or no_numbers_in_text(context), (
+            f"replace_with_num_tokens failed on document: {context[:100]}"
+        )
 
         if idx == total_examples and total_examples < 100:
             tqdm.write(f"[{split_name}] Completed small split in {elapsed:.1f}s")

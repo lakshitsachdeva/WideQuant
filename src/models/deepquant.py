@@ -53,11 +53,13 @@ class DeepQuant(nn.Module):
             self.bert = AutoModel.from_config(bert_cfg)
 
         self.tokenizer, self.num_token_id = setup_tokenizer(
-            encoder_name=encoder_name,
+            model_name=encoder_name,
             local_files_only=local_files_only,
             cache_dir=cache_dir,
-            model=self.bert,
         )
+        self.bert.resize_token_embeddings(len(self.tokenizer))
+        embedding_shape = tuple(self.bert.get_input_embeddings().weight.shape)
+        print(f"[DeepQuant] input embedding shape after resize: {embedding_shape}")
         unk_id = int(self.tokenizer.unk_token_id if self.tokenizer.unk_token_id is not None else 100)
         print(f"[DeepQuant] num_token_id={self.num_token_id}, unk_token_id={unk_id}")
         if self.num_token_id == unk_id:
