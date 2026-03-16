@@ -190,6 +190,11 @@ def main() -> None:
     with open(args.config, "r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
 
+    config.setdefault("model", {})
+    config["model"].setdefault("local_files_only", False)
+    if args.hf_cache_dir is not None:
+        config["model"]["cache_dir"] = args.hf_cache_dir
+
     config.setdefault("training", {})
     config["training"]["warmup_ratio"] = 0.10
     config["training"]["log_every_steps"] = 50

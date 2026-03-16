@@ -28,7 +28,8 @@ class DeepQuant(nn.Module):
 
         model_cfg = config.get("model", {})
         encoder_name = str(model_cfg.get("encoder", "bert-base-uncased"))
-        local_files_only = bool(model_cfg.get("local_files_only", True))
+        local_files_only = bool(model_cfg.get("local_files_only", False))
+        cache_dir = model_cfg.get("cache_dir")
         self.hidden_dim = int(model_cfg.get("hidden_dim", 768))
         self.J_m = int(model_cfg.get("J_m", 691))
         self.J_e = int(model_cfg.get("J_e", 77))
@@ -38,12 +39,14 @@ class DeepQuant(nn.Module):
             self.bert = AutoModel.from_pretrained(
                 encoder_name,
                 local_files_only=local_files_only,
+                cache_dir=cache_dir,
             )
         except Exception:
             try:
                 bert_cfg = AutoConfig.from_pretrained(
                     encoder_name,
                     local_files_only=local_files_only,
+                    cache_dir=cache_dir,
                 )
             except Exception:
                 bert_cfg = BertConfig(hidden_size=self.hidden_dim)
@@ -52,6 +55,7 @@ class DeepQuant(nn.Module):
         self.tokenizer, self.num_token_id = setup_tokenizer(
             encoder_name=encoder_name,
             local_files_only=local_files_only,
+            cache_dir=cache_dir,
             model=self.bert,
         )
         unk_id = int(self.tokenizer.unk_token_id if self.tokenizer.unk_token_id is not None else 100)

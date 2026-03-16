@@ -18,13 +18,15 @@ NUMBER_PATTERN = re.compile(r"(?<!\w)(?:\d+\.?\d*|\.\d+)(?!\w)")
 
 def setup_tokenizer(
     encoder_name: str = "bert-base-uncased",
-    local_files_only: bool = True,
+    local_files_only: bool = False,
+    cache_dir: str | None = None,
     model: Any | None = None,
 ) -> tuple[BertTokenizer, int]:
     """Create tokenizer with [num] as a true special token before any tokenization."""
     tokenizer = BertTokenizer.from_pretrained(
         encoder_name,
         local_files_only=local_files_only,
+        cache_dir=cache_dir,
     )
     tokenizer.add_special_tokens({"additional_special_tokens": ["[num]"]})
 
