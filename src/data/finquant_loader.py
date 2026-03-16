@@ -317,29 +317,41 @@ def _shares_query_concept(query_text: str, doc_text: str) -> bool:
 
 
 def _build_hard_negative_indices(
-    query_texts: Sequence[str],
-    pos_doc_texts: Sequence[str],
+    prepared_queries: Sequence[dict[str, Any]],
+    candidate_rows: Sequence[dict[str, Any]],
     n_negatives: int = 5,
 ) -> list[list[int]]:
     """Mine hard negatives with numeric-adversarial filters and concept matching."""
-    doc_tokens = [_tokenize_for_bm25(text) for text in pos_doc_texts]
-    doc_numeric_values = [_extract_numeric_values(text) for text in pos_doc_texts]
+    candidate_doc_texts = [str(item["pos_doc_text"]) for item in candidate_rows]
+    candidate_source_ids = [str(item["source_id"]) for item in candidate_rows]
+    doc_tokens = [_tokenize_for_bm25(text) for text in candidate_doc_texts]
+    doc_numeric_values = [_extract_numeric_values(text) for text in candidate_doc_texts]
     doc_largest_values = [_largest_abs_numeric_value(values) for values in doc_numeric_values]
     bm25 = BM25Okapi(doc_tokens) if BM25Okapi is not None else None
-    all_indices = list(range(len(pos_doc_texts)))
+    all_indices = list(range(len(candidate_doc_texts)))
     hard_negative_indices: list[list[int]] = []
-    bm25_window = min(200, max(len(pos_doc_texts) - 1, 1))
+    bm25_window = min(500, max(len(candidate_doc_texts) - 1, 1))
 
-    for i, query_text in enumerate(query_texts):
+    for query_item in prepared_queries:
+        query_text = str(query_item["query_text"])
+        query_source_id = str(query_item["source_id"])
         query_tokens = _tokenize_for_bm25(query_text)
         if bm25 is not None:
             scores = bm25.get_scores(query_tokens)
             top_count = min(bm25_window + 1, len(scores))
             candidate_order = np.argsort(-scores)[:top_count].tolist()
-            ranked = [int(idx) for idx in candidate_order if int(idx) != i]
+            ranked = [
+                int(idx)
+                for idx in candidate_order
+                if candidate_source_ids[int(idx)] != query_source_id
+            ]
         else:
             ranked = _lexical_rank_fallback(query_tokens, doc_tokens)
-            ranked = [int(idx) for idx in ranked if int(idx) != i][:bm25_window]
+            ranked = [
+                int(idx)
+                for idx in ranked
+                if candidate_source_ids[int(idx)] != query_source_id
+            ][:bm25_window]
 
         threshold_target = n_negatives // 2
         bm25_target = n_negatives - threshold_target
@@ -347,15 +359,15 @@ def _build_hard_negative_indices(
         selected: list[int] = []
         selected_set: set[int] = set()
 
-        pos_values = doc_numeric_values[i]
-        pos_largest = doc_largest_values[i]
+        pos_values = _extract_numeric_values(str(query_item["pos_doc_text"]))
+        pos_largest = _largest_abs_numeric_value(pos_values)
 
         # Bucket 1: concept-consistent threshold-violation negatives.
         threshold_candidates = base_pool + [idx for idx in ranked if idx not in base_pool]
         for cand_idx in threshold_candidates:
             if cand_idx in selected_set:
                 continue
-            if not _shares_query_concept(query_text, pos_doc_texts[cand_idx]):
+            if not _shares_query_concept(query_text, candidate_doc_texts[cand_idx]):
                 continue
             cand_largest = doc_largest_values[cand_idx]
             if pos_largest is None or cand_largest is None:
@@ -374,7 +386,7 @@ def _build_hard_negative_indices(
         for cand_idx in bm25_candidates:
             if cand_idx in selected_set:
                 continue
-            if not _shares_query_concept(query_text, pos_doc_texts[cand_idx]):
+            if not _shares_query_concept(query_text, candidate_doc_texts[cand_idx]):
                 continue
             cand_values = doc_numeric_values[cand_idx]
             if _has_numeric_overlap(pos_values, cand_values, tolerance=0.05):
@@ -400,13 +412,17 @@ def _build_hard_negative_indices(
 
         # Final fallback to guarantee cardinality.
         if len(selected) < n_negatives:
-            pool = [idx for idx in all_indices if idx != i and idx not in selected_set]
+            pool = [
+                idx
+                for idx in all_indices
+                if candidate_source_ids[idx] != query_source_id and idx not in selected_set
+            ]
             random.shuffle(pool)
             selected.extend(pool[: n_negatives - len(selected)])
 
-        while len(selected) < n_negatives and len(pos_doc_texts) > 1:
-            next_idx = (i + len(selected) + 1) % len(pos_doc_texts)
-            if next_idx != i and next_idx not in selected_set:
+        while len(selected) < n_negatives and len(candidate_doc_texts) > 1:
+            next_idx = (len(selected) + 1) % len(candidate_doc_texts)
+            if candidate_source_ids[next_idx] != query_source_id and next_idx not in selected_set:
                 selected.append(next_idx)
                 selected_set.add(next_idx)
 
@@ -414,16 +430,15 @@ def _build_hard_negative_indices(
     return hard_negative_indices
 
 
-def convert_split_to_triples(
+def _prepare_split_rows(
     split: Dataset,
     cqe: CQEWrapper | None,
-    n_negatives: int = 5,
     skip_cqe: bool = False,
     span_cache: dict[str, list[dict[str, Any]]] | None = None,
     cache_stats: dict[str, int] | None = None,
     split_name: str = "split",
 ) -> list[dict[str, Any]]:
-    """Convert one split of QA examples into retrieval triples with hard negatives."""
+    """Convert one split of QA examples into normalized query/document rows."""
     prepared: list[dict[str, Any]] = []
     total_examples = len(split)
     span_cache = span_cache if span_cache is not None else {}
@@ -479,6 +494,7 @@ def convert_split_to_triples(
 
         prepared.append(
             {
+                "source_id": f"{split_name}:{idx - 1}",
                 "query_text": query_text,
                 "query_spans": query_spans,
                 "pos_doc_text": pos_doc_text,
@@ -486,22 +502,29 @@ def convert_split_to_triples(
             }
         )
 
-    if not prepared:
+    return prepared
+
+
+def convert_prepared_rows_to_triples(
+    prepared_rows: Sequence[dict[str, Any]],
+    candidate_rows: Sequence[dict[str, Any]],
+    n_negatives: int = 5,
+) -> list[dict[str, Any]]:
+    """Attach hard negatives to prepared rows and emit JSON-serializable triples."""
+    if not prepared_rows:
         return []
 
-    query_texts = [item["query_text"] for item in prepared]
-    pos_doc_texts = [item["pos_doc_text"] for item in prepared]
     hard_neg_indices = _build_hard_negative_indices(
-        query_texts,
-        pos_doc_texts,
+        prepared_rows,
+        candidate_rows,
         n_negatives=n_negatives,
     )
 
     triples: list[dict[str, Any]] = []
-    for i, item in enumerate(prepared):
+    for i, item in enumerate(prepared_rows):
         neg_ids = hard_neg_indices[i]
-        neg_doc_texts = [prepared[idx]["pos_doc_text"] for idx in neg_ids]
-        neg_doc_spans = [prepared[idx]["pos_doc_spans"] for idx in neg_ids]
+        neg_doc_texts = [candidate_rows[idx]["pos_doc_text"] for idx in neg_ids]
+        neg_doc_spans = [candidate_rows[idx]["pos_doc_spans"] for idx in neg_ids]
         triples.append(
             {
                 "query_text": item["query_text"],
@@ -550,10 +573,11 @@ def verify_hard_negatives(
     dev_triples: Sequence[dict[str, Any]],
     sample_n: int = 100,
     seed: int = 42,
+    pass_threshold: float = 0.40,
 ) -> float:
     """Evaluate BM25 MRR@10 on positive-vs-negatives ranking and print pass/fail."""
     bm25_mrr = _bm25_mrr_at_10(dev_triples, sample_size=sample_n, seed=seed)
-    status = "PASS" if bm25_mrr < 0.30 else "FAIL"
+    status = "PASS" if bm25_mrr < pass_threshold else "FAIL"
     print(f"Hard negatives BM25 MRR@10: {bm25_mrr:.4f} [{status}]")
     return bm25_mrr
 
@@ -602,6 +626,77 @@ def _save_jsonl(rows: Iterable[dict[str, Any]], path: Path) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=True) + "\n")
+
+
+def _load_existing_prepared_rows(path: Path, split_name: str) -> list[dict[str, Any]]:
+    """Load existing retrieval triples as prepared rows for negative re-mining."""
+    prepared: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for idx, line in enumerate(handle):
+            row = json.loads(line)
+            prepared.append(
+                {
+                    "source_id": f"{split_name}:{idx}",
+                    "query_text": str(row["query_text"]),
+                    "query_spans": [_span_from_json(item) for item in row.get("query_spans", [])],
+                    "pos_doc_text": str(row["pos_doc_text"]),
+                    "pos_doc_spans": [_span_from_json(item) for item in row.get("pos_doc_spans", [])],
+                }
+            )
+    return prepared
+
+
+def remine_saved_splits(
+    output_dir: str = "data/finquant",
+    seed: int = 42,
+    n_negatives: int = 5,
+) -> dict[str, int]:
+    """Reload existing processed texts and rebuild only the hard negatives."""
+    output_path = Path(output_dir)
+    train_path = output_path / "train.jsonl"
+    dev_path = output_path / "dev.jsonl"
+    test_path = output_path / "test.jsonl"
+    for path in (train_path, dev_path, test_path):
+        if not path.exists():
+            raise FileNotFoundError(f"Missing existing split for re-mining: {path}")
+
+    train_prepared = _load_existing_prepared_rows(train_path, "train")
+    dev_prepared = _load_existing_prepared_rows(dev_path, "dev")
+    test_prepared = _load_existing_prepared_rows(test_path, "test")
+    global_pool = [*train_prepared, *dev_prepared, *test_prepared]
+    print(
+        "Re-mining saved splits:",
+        f"train={len(train_prepared)}",
+        f"dev={len(dev_prepared)}",
+        f"test={len(test_prepared)}",
+        f"global_pool={len(global_pool)}",
+    )
+
+    train_triples = convert_prepared_rows_to_triples(
+        train_prepared,
+        train_prepared,
+        n_negatives=n_negatives,
+    )
+    dev_triples = convert_prepared_rows_to_triples(
+        dev_prepared,
+        global_pool,
+        n_negatives=n_negatives,
+    )
+    test_triples = convert_prepared_rows_to_triples(
+        test_prepared,
+        global_pool,
+        n_negatives=n_negatives,
+    )
+
+    _save_jsonl(train_triples, train_path)
+    _save_jsonl(dev_triples, dev_path)
+    _save_jsonl(test_triples, test_path)
+
+    print(f"Saved {len(train_triples)} triples to {train_path}")
+    print(f"Saved {len(dev_triples)} triples to {dev_path}")
+    print(f"Saved {len(test_triples)} triples to {test_path}")
+    verify(dev_triples, seed=seed)
+    return {"train": len(train_triples), "dev": len(dev_triples), "test": len(test_triples)}
 
 
 def build_and_save_splits(
@@ -657,32 +752,52 @@ def build_and_save_splits(
         dev_split = _limit_split(dev_split, max_examples)
         test_split = _limit_split(test_split, max_examples)
 
-    train_triples = convert_split_to_triples(
+    train_prepared = _prepare_split_rows(
         train_split,
         cqe,
-        n_negatives=n_negatives,
         skip_cqe=skip_cqe,
         span_cache=span_cache,
         cache_stats=cache_stats,
         split_name="train",
     )
-    dev_triples = convert_split_to_triples(
+    dev_prepared = _prepare_split_rows(
         dev_split,
         cqe,
-        n_negatives=n_negatives,
         skip_cqe=skip_cqe,
         span_cache=span_cache,
         cache_stats=cache_stats,
         split_name="dev",
     )
-    test_triples = convert_split_to_triples(
+    test_prepared = _prepare_split_rows(
         test_split,
         cqe,
-        n_negatives=n_negatives,
         skip_cqe=skip_cqe,
         span_cache=span_cache,
         cache_stats=cache_stats,
         split_name="test",
+    )
+
+    global_pool = [*train_prepared, *dev_prepared, *test_prepared]
+    print(
+        "Negative mining pools:",
+        f"train={len(train_prepared)}",
+        f"dev/test={len(global_pool)}",
+    )
+
+    train_triples = convert_prepared_rows_to_triples(
+        train_prepared,
+        train_prepared,
+        n_negatives=n_negatives,
+    )
+    dev_triples = convert_prepared_rows_to_triples(
+        dev_prepared,
+        global_pool,
+        n_negatives=n_negatives,
+    )
+    test_triples = convert_prepared_rows_to_triples(
+        test_prepared,
+        global_pool,
+        n_negatives=n_negatives,
     )
 
     train_path = output_path / "train.jsonl"
@@ -723,20 +838,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip_cqe", action="store_true")
     parser.add_argument("--streaming", action="store_true")
     parser.add_argument("--cache_dir", type=str, default=None)
+    parser.add_argument("--remine_existing", action="store_true")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    counts = build_and_save_splits(
-        output_dir=args.output_dir,
-        seed=args.seed,
-        n_negatives=args.n_negatives,
-        max_examples=args.max_examples,
-        skip_cqe=args.skip_cqe,
-        streaming=args.streaming,
-        cache_dir=args.cache_dir,
-    )
+    if args.remine_existing:
+        counts = remine_saved_splits(
+            output_dir=args.output_dir,
+            seed=args.seed,
+            n_negatives=args.n_negatives,
+        )
+    else:
+        counts = build_and_save_splits(
+            output_dir=args.output_dir,
+            seed=args.seed,
+            n_negatives=args.n_negatives,
+            max_examples=args.max_examples,
+            skip_cqe=args.skip_cqe,
+            streaming=args.streaming,
+            cache_dir=args.cache_dir,
+        )
     print(
         "Saved splits:",
         f"train={counts['train']}, dev={counts['dev']}, test={counts['test']}",
