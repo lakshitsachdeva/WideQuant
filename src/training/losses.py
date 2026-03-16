@@ -8,6 +8,40 @@ import torch
 from torch import Tensor, nn
 
 
+def debug_infonce(pos_scores: Tensor, neg_scores: Tensor, temperature: float = 0.02) -> Tensor:
+    """Print diagnostic statistics for one InfoNCE batch and return the mean loss."""
+    if neg_scores.ndim != 2 or neg_scores.shape[1] < 1:
+        raise ValueError("debug_infonce requires neg_scores with shape (batch, n_neg) and n_neg >= 1.")
+
+    pos_scores = pos_scores.to(dtype=torch.float32)
+    neg_scores = neg_scores.to(dtype=torch.float32)
+    joint_scores = torch.cat([pos_scores.unsqueeze(1), neg_scores], dim=1)
+    scale = torch.clamp(joint_scores.abs().amax(dim=1, keepdim=True), min=1.0)
+    pos_norm = pos_scores.unsqueeze(1) / scale
+    neg_norm = neg_scores / scale
+
+    print(f"  pos_scores range: [{pos_scores.min():.4f}, {pos_scores.max():.4f}]")
+    print(f"  neg_scores range: [{neg_scores.min():.4f}, {neg_scores.max():.4f}]")
+    print(f"  pos/tau range: [{(pos_norm / temperature).min():.4f}, {(pos_norm / temperature).max():.4f}]")
+    exp_pos = torch.exp(pos_norm.squeeze(1) / temperature)
+    exp_neg = torch.exp(neg_norm / temperature)
+    print(f"  exp(pos/tau): {exp_pos.mean():.6f}")
+    print(f"  exp(neg/tau) mean: {exp_neg.mean():.6f}")
+    if torch.isinf(exp_pos).any() or torch.isinf(exp_neg).any():
+        print("  CRITICAL: inf values — scores are too large for tau=0.02")
+        print("  FIX: normalize scores before dividing by temperature")
+    if exp_pos.mean() < 1e-10:
+        print("  CRITICAL: exp(pos/tau) underflowing to zero")
+        print("  FIX: scores are too negative — check score computation")
+
+    logits = torch.cat([pos_norm / temperature, neg_norm / temperature], dim=1)
+    numerator = torch.exp(logits[:, 0])
+    denominator = torch.exp(logits).sum(dim=1)
+    loss = -torch.log((numerator / denominator).clamp_min(1e-8))
+    print(f"  loss before mean: {loss}")
+    return loss.mean()
+
+
 class InfoNCELoss(nn.Module):
     """Retrieval contrastive loss L_retr."""
 
@@ -26,9 +60,15 @@ class InfoNCELoss(nn.Module):
             raise ValueError("neg_scores must have shape (batch, n_neg).")
         if neg_scores.shape[0] != pos_scores.shape[0]:
             raise ValueError("Batch size mismatch between pos_scores and neg_scores.")
+        if neg_scores.shape[1] < 1:
+            raise ValueError("neg_scores must contain at least one negative per query.")
 
-        pos_scaled = pos_scores.to(dtype=torch.float32) / self.temperature
-        neg_scaled = neg_scores.to(dtype=torch.float32) / self.temperature
+        pos_scores = pos_scores.to(dtype=torch.float32)
+        neg_scores = neg_scores.to(dtype=torch.float32)
+        joint_scores = torch.cat([pos_scores.unsqueeze(1), neg_scores], dim=1)
+        scale = torch.clamp(joint_scores.abs().amax(dim=1, keepdim=True), min=1.0)
+        pos_scaled = (pos_scores.unsqueeze(1) / scale).squeeze(1) / self.temperature
+        neg_scaled = (neg_scores / scale) / self.temperature
         logits = torch.cat([pos_scaled.unsqueeze(1), neg_scaled], dim=1)
         loss = -(pos_scaled - torch.logsumexp(logits, dim=1))
         return loss.mean()

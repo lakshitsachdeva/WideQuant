@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from datasets import Dataset, load_dataset
+import numpy as np
 from tqdm import tqdm
 
 try:
@@ -254,11 +255,26 @@ def _extract_numeric_values(text: str) -> list[float]:
     return values
 
 
+def _is_likely_year(value: float) -> bool:
+    """Heuristic filter for standalone reporting years that should not dominate matching."""
+    return float(value).is_integer() and 1800.0 <= abs(value) <= 2100.0
+
+
+def _significant_numeric_values(values: Sequence[float], limit: int = 3) -> list[float]:
+    """Keep the most meaningful numeric values and ignore likely years when possible."""
+    filtered = [float(v) for v in values if not _is_likely_year(float(v))]
+    if filtered:
+        values = filtered
+    ranked = sorted((float(v) for v in values), key=lambda val: abs(val), reverse=True)
+    return ranked[: max(1, int(limit))]
+
+
 def _largest_abs_numeric_value(values: Sequence[float]) -> float | None:
     """Return largest-magnitude numeric value in a sequence."""
-    if not values:
+    significant = _significant_numeric_values(values, limit=1)
+    if not significant:
         return None
-    return max(values, key=lambda val: abs(val))
+    return significant[0]
 
 
 def _relative_difference(a: float, b: float) -> float:
@@ -273,6 +289,8 @@ def _has_numeric_overlap(
     tolerance: float = 0.05,
 ) -> bool:
     """Check whether any candidate number appears in positive numbers within +/- tolerance."""
+    pos_values = _significant_numeric_values(pos_values, limit=3)
+    cand_values = _significant_numeric_values(cand_values, limit=3)
     if not pos_values or not cand_values:
         return False
     for cand in cand_values:
@@ -310,31 +328,22 @@ def _build_hard_negative_indices(
     bm25 = BM25Okapi(doc_tokens) if BM25Okapi is not None else None
     all_indices = list(range(len(pos_doc_texts)))
     hard_negative_indices: list[list[int]] = []
+    bm25_window = min(200, max(len(pos_doc_texts) - 1, 1))
 
     for i, query_text in enumerate(query_texts):
         query_tokens = _tokenize_for_bm25(query_text)
-        positive_score: float | None = None
-        high_lexical_ranked: list[int] = []
         if bm25 is not None:
             scores = bm25.get_scores(query_tokens)
-            ranked = sorted(range(len(scores)), key=lambda idx: float(scores[idx]), reverse=True)
-            positive_score = float(scores[i])
-            high_lexical_ranked = [
-                idx for idx in ranked if idx != i and float(scores[idx]) >= positive_score
-            ]
+            top_count = min(bm25_window + 1, len(scores))
+            candidate_order = np.argsort(-scores)[:top_count].tolist()
+            ranked = [int(idx) for idx in candidate_order if int(idx) != i]
         else:
             ranked = _lexical_rank_fallback(query_tokens, doc_tokens)
-        ranked = [idx for idx in ranked if idx != i]
+            ranked = [int(idx) for idx in ranked if int(idx) != i][:bm25_window]
 
         threshold_target = n_negatives // 2
         bm25_target = n_negatives - threshold_target
-        base_pool = high_lexical_ranked[:100] if high_lexical_ranked else ranked[:100]
-        if len(base_pool) < 100:
-            for idx in ranked:
-                if idx not in base_pool:
-                    base_pool.append(idx)
-                if len(base_pool) >= 100:
-                    break
+        base_pool = ranked[:bm25_window]
         selected: list[int] = []
         selected_set: set[int] = set()
 
@@ -361,16 +370,15 @@ def _build_hard_negative_indices(
                 break
 
         # Bucket 2: BM25 negatives with low numeric overlap and high lexical pressure.
-        bm25_candidates = base_pool + [idx for idx in ranked if idx not in base_pool]
+        bm25_candidates = list(base_pool)
         for cand_idx in bm25_candidates:
             if cand_idx in selected_set:
+                continue
+            if not _shares_query_concept(query_text, pos_doc_texts[cand_idx]):
                 continue
             cand_values = doc_numeric_values[cand_idx]
             if _has_numeric_overlap(pos_values, cand_values, tolerance=0.05):
                 continue
-            if bm25 is not None and positive_score is not None:
-                if float(scores[cand_idx]) < positive_score * 0.90:
-                    continue
             selected.append(int(cand_idx))
             selected_set.add(int(cand_idx))
             if len(selected) >= threshold_target + bm25_target:
@@ -378,7 +386,7 @@ def _build_hard_negative_indices(
 
         # Fallback pass over a bounded ranking window for speed.
         if len(selected) < n_negatives:
-            fallback_candidates = ranked[:200]
+            fallback_candidates = ranked[:bm25_window]
             for cand_idx in fallback_candidates:
                 if cand_idx in selected_set:
                     continue

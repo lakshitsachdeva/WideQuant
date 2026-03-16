@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 from src.data.finquant_loader import build_and_save_splits
 from src.models.deepquant import DeepQuant
+from src.data.finquant_loader import verify_hard_negatives
 from src.training.trainer import DeepQuantTrainer
 from scripts.verify_num_injection import run_verification
 
@@ -38,6 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build_skip_cqe", action="store_true")
     parser.add_argument("--streaming_data", action="store_true")
     parser.add_argument("--hf_cache_dir", type=str, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
     return parser.parse_args()
 
 
@@ -199,7 +202,10 @@ def main() -> None:
     config.setdefault("training", {})
     config["training"]["warmup_ratio"] = 0.10
     config["training"]["log_every_steps"] = 50
-    config["training"]["epochs"] = int(config["training"].get("epochs", 8))
+    if args.epochs is not None:
+        config["training"]["epochs"] = int(args.epochs)
+    else:
+        config["training"]["epochs"] = int(config["training"].get("epochs", 8))
 
     run_verification(config)
 
@@ -266,6 +272,8 @@ def main() -> None:
         train_dataloader=train_dataloader,
         dev_dataloader=dev_dataloader,
     )
+    trainer.ckpt_dir = Path(args.checkpoint_dir)
+    trainer.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     if args.dry_run:
         print("DRY RUN — not a real training run, gate not evaluated")
@@ -279,7 +287,8 @@ def main() -> None:
         trainer.writer.close()
         return
 
-    results = trainer.train(n_epochs=8)
+    bm25_mrr = verify_hard_negatives(dev_rows, sample_n=min(100, len(dev_rows)), seed=args.seed)
+    results = trainer.train(n_epochs=int(config["training"]["epochs"]))
     best_mrr10 = float(results["best_mrr10"])
     print(f"Final best MRR@10: {best_mrr10:.4f}")
     print(f"Gate evaluated on {len(dev_dataset)} dev examples")
@@ -295,6 +304,34 @@ def main() -> None:
             curve = loss_curves.get(key, [])
             print(f"{key}: {curve}")
         print("DIAGNOSE BEFORE SCALING")
+
+    loss_curves = results.get("loss_curves", {})
+    l_retr_curve = loss_curves.get("L_retr", [])
+    l_quant_curve = loss_curves.get("L_quant", [])
+    l_reg_curve = loss_curves.get("L_reg", [])
+    l_comp_curve = loss_curves.get("L_comp", [])
+    ckpt_path = trainer.ckpt_dir / "best_deepquant.pt"
+    ckpt_size_mb = ckpt_path.stat().st_size / (1024.0 * 1024.0) if ckpt_path.exists() else 0.0
+
+    print("=== DEEPQUANT TRAINING COMPLETE ===")
+    print(f"Best Dev MRR@10: {best_mrr10:.4f}")
+    print(f"Gate (>= 0.70): {'PASS' if best_mrr10 >= 0.70 else 'FAIL'}")
+    print()
+    print("Individual losses at epoch 8:")
+    print(f"L_retr:  {l_retr_curve[-1] if l_retr_curve else 0.0:.4f}  (should be < 1.0)")
+    print(f"L_quant: {l_quant_curve[-1] if l_quant_curve else 0.0:.4f}  (should be < 0.5)")
+    print(f"L_reg:   {l_reg_curve[-1] if l_reg_curve else 0.0:.4f}  (should be < 0.1)")
+    print(f"L_comp:  {l_comp_curve[-1] if l_comp_curve else 0.0:.4f}  (should be < 0.5)")
+    print()
+    print(f"[num] token verified in training batches: {'YES' if trainer._checked_first_num_batch else 'NO'}")
+    print(f"Hard negative BM25 MRR: {bm25_mrr:.4f} (should be < 0.40)")
+    print()
+    print(f"Checkpoint saved: {ckpt_path}")
+    print(f"File size: {ckpt_size_mb:.2f} MB")
+    if best_mrr10 >= 0.70:
+        print("PHASE 2 GATE CLEARED. PROCEED TO PHASE 3.")
+    else:
+        print("If FAIL: paste this output and diagnose before proceeding.")
 
 
 if __name__ == "__main__":

@@ -12,8 +12,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
+from transformers import get_linear_schedule_with_warmup
 
 try:
     import faiss  # type: ignore
@@ -39,7 +39,7 @@ except Exception:  # pragma: no cover - tensorboard fallback
             return None
 
 from src.encoding.cqe_wrapper import QuantitySpan
-from src.training.losses import TotalLoss
+from src.training.losses import TotalLoss, debug_infonce
 
 
 class DeepQuantTrainer:
@@ -121,9 +121,10 @@ class DeepQuantTrainer:
         self._seen_hard_negatives = False
         self._checked_first_num_batch = False
         self._num_check_attempts = 0
+        self._did_infonce_debug = False
         self._last_train_losses: dict[str, float] = {}
-        self.bert_scheduler: Optional[LambdaLR] = None
-        self.head_scheduler: Optional[LambdaLR] = None
+        self.bert_scheduler: Optional[Any] = None
+        self.head_scheduler: Optional[Any] = None
         self.loss_history: dict[str, list[float]] = defaultdict(list)
         self.epoch_history: dict[str, list[float]] = defaultdict(list)
 
@@ -140,19 +141,15 @@ class DeepQuantTrainer:
         return payload
 
     @staticmethod
-    def _build_linear_warmup_scheduler(optimizer: AdamW, total_steps: int, warmup_steps: int) -> LambdaLR:
-        """Build linear warmup + linear decay scheduler."""
+    def _build_linear_warmup_scheduler(optimizer: AdamW, total_steps: int, warmup_steps: int) -> Any:
+        """Build linear warmup + linear decay scheduler via Transformers helper."""
         total_steps = max(int(total_steps), 1)
         warmup_steps = max(int(warmup_steps), 0)
-
-        def lr_lambda(current_step: int) -> float:
-            if warmup_steps > 0 and current_step < warmup_steps:
-                return float(current_step + 1) / float(max(1, warmup_steps))
-            remaining_steps = total_steps - current_step - 1
-            decay_steps = max(1, total_steps - warmup_steps)
-            return max(0.0, float(remaining_steps) / float(decay_steps))
-
-        return LambdaLR(optimizer, lr_lambda=lr_lambda)
+        return get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_steps,
+        )
 
     @staticmethod
     def _unpack_batch(batch: Any) -> tuple[dict, dict, Optional[dict]]:
@@ -179,13 +176,18 @@ class DeepQuantTrainer:
 
     def _build_loss_inputs(self, model_outputs: dict, neg_scores_override: Optional[Tensor] = None) -> dict:
         """Build all inputs required by TotalLoss from current model outputs."""
+        loss_inputs: dict[str, Any] = {}
         pos_score = model_outputs["pos_final_score"].reshape(1)
         if neg_scores_override is not None:
             neg_score = neg_scores_override.to(device=self.device, dtype=torch.float32)
+            loss_inputs["pos_scores"] = pos_score
+            loss_inputs["neg_scores"] = neg_score
         elif model_outputs.get("neg_final_score") is None:
-            neg_score = torch.zeros((1, 1), device=self.device, dtype=torch.float32)
+            neg_score = None
         else:
             neg_score = model_outputs["neg_final_score"].reshape(1, 1)
+            loss_inputs["pos_scores"] = pos_score
+            loss_inputs["neg_scores"] = neg_score
 
         query_enc = model_outputs["query_enc"]
         doc_pos_enc = model_outputs["doc_pos_enc"]
@@ -239,9 +241,8 @@ class DeepQuantTrainer:
         is_satisfying_mask = torch.zeros_like(resolved_candidate_scores, dtype=torch.bool)
         is_satisfying_mask[int(torch.argmax(resolved_candidate_scores).item())] = True
 
-        return {
-            "pos_scores": pos_score,
-            "neg_scores": neg_score,
+        loss_inputs.update(
+            {
             "pred_exponent_logits": pred_exp_logits,
             "true_exponent": true_exp,
             "pred_mantissa": pred_man,
@@ -254,7 +255,9 @@ class DeepQuantTrainer:
             "true_relations": true_relations,
             "resolved_candidate_scores": resolved_candidate_scores,
             "is_satisfying_mask": is_satisfying_mask,
-        }
+            }
+        )
+        return loss_inputs
 
     @staticmethod
     def _ranking_metrics(rank_labels: list[list[int]]) -> dict:
@@ -364,8 +367,24 @@ class DeepQuantTrainer:
                         neg_scores.append(neg_outputs["final_score"].reshape(()))
                     if neg_scores:
                         neg_scores_override = torch.stack(neg_scores, dim=0).unsqueeze(0)
+                if neg_scores_override is None:
+                    raise RuntimeError(
+                        "CRITICAL: No negative scores were produced for the training batch. "
+                        "Check hard-negative batch construction before computing InfoNCE."
+                    )
 
                 loss_inputs = self._build_loss_inputs(model_outputs, neg_scores_override=neg_scores_override)
+                if epoch == 1 and not self._did_infonce_debug:
+                    print("InfoNCE debug (epoch 1, first batch):")
+                    debug_infonce(
+                        loss_inputs["pos_scores"],
+                        loss_inputs["neg_scores"],
+                        temperature=self.temperature,
+                    )
+                    pos_vec = loss_inputs["pos_scores"].detach()
+                    neg_vec = loss_inputs["neg_scores"].detach()
+                    print(f"  pos_scores == neg_scores allclose: {torch.allclose(pos_vec.unsqueeze(1), neg_vec)}")
+                    self._did_infonce_debug = True
                 loss_dict = self.loss_fn(loss_inputs)
                 scaled_loss = loss_dict["total"] / float(self.gradient_accumulation_steps)
 
@@ -656,10 +675,23 @@ class DeepQuantTrainer:
                 )
 
             train_total = train_losses.get("total", 0.0)
+            l_retr = float(train_losses.get("L_retr", 0.0))
+            l_quant = float(train_losses.get("L_quant", 0.0))
+            l_reg = float(train_losses.get("L_reg", 0.0))
+            l_comp = float(train_losses.get("L_comp", 0.0))
             print(
-                f"Epoch {epoch} | Train Loss: {train_total:.4f} | "
-                f"Dev MRR@10: {dev_metrics['MRR@10']:.4f} | Best: {self.best_mrr10:.4f}"
+                f"Epoch {epoch} | L_retr: {l_retr:.4f} | L_quant: {l_quant:.4f} | "
+                f"L_reg: {l_reg:.4f} | L_comp: {l_comp:.4f} | "
+                f"Train Loss: {train_total:.4f} | Dev MRR@10: {dev_metrics['MRR@10']:.4f} | "
+                f"Best: {self.best_mrr10:.4f}"
             )
+
+            if epoch == 3:
+                retr_curve = self.epoch_history.get("L_retr", [])
+                if len(retr_curve) >= 3 and not (retr_curve[2] < retr_curve[1] < retr_curve[0]):
+                    print("L_retr did not decrease across the first 3 epochs. Stopping early.")
+                    print("InfoNCE debug output above should be used to diagnose score ranges and negatives.")
+                    break
 
         debug_results = None
         if n_epochs >= 8 and self.best_mrr10 < 0.65:
