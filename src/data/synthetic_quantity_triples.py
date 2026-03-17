@@ -35,6 +35,8 @@ LEXICAL_NEGATIVE_TEMPLATES = [
     "The catalog highlights {concept} of {value} {unit} for this item.",
 ]
 
+TARGET_NEGATIVES = 7
+
 CONCEPT_SPECS: dict[str, dict[str, Any]] = {
     "battery life": {
         "units": {"hours": 1.0, "hr": 1.0, "minutes": 1.0 / 60.0},
@@ -183,7 +185,7 @@ def generate_numeric_triples(n: int = 10000, seed: int = 42) -> list[dict[str, A
                 )
 
         lexical_negs: list[str] = []
-        for _ in range(2):
+        for _ in range(3):
             lexical_value = threshold * rng.uniform(0.5, 0.98)
             lexical_negs.append(_build_negative_text(concept, lexical_value, query_unit, rng))
 
@@ -193,6 +195,7 @@ def generate_numeric_triples(n: int = 10000, seed: int = 42) -> list[dict[str, A
             replace_with_num_tokens_regex(text)
             for text in [*threshold_violation_negs, *wrong_unit_negs, *lexical_negs]
         ]
+        neg_doc_texts = neg_doc_texts[:TARGET_NEGATIVES]
 
         triples.append(
             {

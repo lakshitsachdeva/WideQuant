@@ -97,7 +97,7 @@ def _ensure_dataset_ready(
         sample_rows = _load_jsonl(train_path)[:1]
         if sample_rows:
             negs = sample_rows[0].get("neg_doc_texts", [])
-            if len(negs) < n_negatives:
+            if len(negs) < n_negatives and dataset_name != "combined":
                 need_build = True
 
     if need_build:
