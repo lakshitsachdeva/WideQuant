@@ -5,8 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 from typing import Any, Sequence
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.data.msmarco_loader import verify_hard_negatives
 from src.encoding.cqe_wrapper import replace_with_num_tokens_regex
