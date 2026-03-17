@@ -1,4 +1,4 @@
-"""Train DeepQuant on FinQuant retrieval triples built by finquant_loader."""
+"""Train DeepQuant on retrieval triples built from FinQuant or MS MARCO."""
 
 from __future__ import annotations
 
@@ -17,16 +17,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.data.finquant_loader import build_and_save_splits
+from src.data.finquant_loader import build_and_save_splits as build_finquant_splits
+from src.data.finquant_loader import verify_hard_negatives as verify_finquant_hard_negatives
+from src.data.msmarco_loader import build_and_save_splits as build_msmarco_splits
+from src.data.msmarco_loader import verify_hard_negatives as verify_msmarco_hard_negatives
 from src.models.deepquant import DeepQuant
-from src.data.finquant_loader import verify_hard_negatives
 from src.training.trainer import DeepQuantTrainer
 from scripts.verify_num_injection import run_verification
 
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
-    parser = argparse.ArgumentParser(description="Train DeepQuant on FinQuant retrieval triples")
+    parser = argparse.ArgumentParser(description="Train DeepQuant on retrieval triples")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--data_dir", type=str, default="data/finquant")
     parser.add_argument("--seed", type=int, default=42)
@@ -64,6 +66,16 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _resolve_dataset_backend(data_dir: Path) -> tuple[str, Any, Any]:
+    """Resolve dataset-specific builder and verifier from the output directory."""
+    data_dir_text = str(data_dir).lower()
+    if "combined" in data_dir_text:
+        return "combined", None, verify_msmarco_hard_negatives
+    if "msmarco" in data_dir_text:
+        return "msmarco", build_msmarco_splits, verify_msmarco_hard_negatives
+    return "finquant", build_finquant_splits, verify_finquant_hard_negatives
+
+
 def _ensure_dataset_ready(
     data_dir: Path,
     seed: int,
@@ -75,6 +87,7 @@ def _ensure_dataset_ready(
     hf_cache_dir: str | None,
 ) -> None:
     """Build retrieval triples if missing or incompatible with required negative count."""
+    dataset_name, dataset_builder, _ = _resolve_dataset_backend(data_dir)
     train_path = data_dir / "train.jsonl"
     dev_path = data_dir / "dev.jsonl"
     test_path = data_dir / "test.jsonl"
@@ -88,8 +101,17 @@ def _ensure_dataset_ready(
                 need_build = True
 
     if need_build:
-        print(f"Building retrieval triples at {data_dir} with {n_negatives} hard negatives/query ...")
-        counts = build_and_save_splits(
+        if dataset_builder is None:
+            raise ValueError(
+                f"Dataset directory {data_dir} is missing train/dev/test JSONL files. "
+                "Build the combined dataset first with "
+                "src/data/synthetic_quantity_triples.py."
+            )
+        print(
+            f"Building {dataset_name} retrieval triples at {data_dir} "
+            f"with {n_negatives} hard negatives/query ..."
+        )
+        counts = dataset_builder(
             output_dir=str(data_dir),
             seed=seed,
             n_negatives=n_negatives,
@@ -184,6 +206,44 @@ def _trim_examples(rows: list[dict[str, Any]], max_examples: int | None) -> list
     if max_examples is None:
         return rows
     return rows[: max(0, int(max_examples))]
+
+
+def _evaluate_optional_dev_splits(
+    trainer: DeepQuantTrainer,
+    model: DeepQuant,
+    data_dir: Path,
+    max_length: int,
+    num_hard_negatives: int,
+) -> dict[str, dict[str, float]]:
+    """Evaluate optional named dev splits such as dev_msmarco/dev_synthetic if they exist."""
+    split_files = {
+        "MS MARCO dev": data_dir / "dev_msmarco.jsonl",
+        "Synthetic dev": data_dir / "dev_synthetic.jsonl",
+    }
+    results: dict[str, dict[str, float]] = {}
+
+    ckpt_path = trainer.ckpt_dir / "best_deepquant.pt"
+    if ckpt_path.exists():
+        state = torch.load(ckpt_path, map_location=trainer.device)
+        model.load_state_dict(state["model_state_dict"])
+
+    for label, path in split_files.items():
+        if not path.exists():
+            continue
+        rows = _load_jsonl(path)
+        if not rows:
+            continue
+        dataset = FinQuantRetrievalDataset(
+            triples=rows,
+            tokenizer=model.tokenizer,
+            max_length=max_length,
+            with_negatives=False,
+            num_hard_negatives=num_hard_negatives,
+        )
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=_collate_identity)
+        metrics = trainer.evaluate(dataloader)
+        results[label] = metrics
+    return results
 
 
 def main() -> None:
@@ -287,7 +347,9 @@ def main() -> None:
         trainer.writer.close()
         return
 
-    bm25_mrr = verify_hard_negatives(dev_rows, sample_n=min(100, len(dev_rows)), seed=args.seed)
+    dataset_name, _, hard_negative_verifier = _resolve_dataset_backend(data_dir)
+    print(f"Training dataset backend: {dataset_name}")
+    bm25_mrr = hard_negative_verifier(dev_rows, sample_n=min(100, len(dev_rows)), seed=args.seed)
     results = trainer.train(n_epochs=int(config["training"]["epochs"]))
     best_mrr10 = float(results["best_mrr10"])
     print(f"Final best MRR@10: {best_mrr10:.4f}")
@@ -328,6 +390,21 @@ def main() -> None:
     print()
     print(f"Checkpoint saved: {ckpt_path}")
     print(f"File size: {ckpt_size_mb:.2f} MB")
+
+    extra_dev_results = _evaluate_optional_dev_splits(
+        trainer=trainer,
+        model=model,
+        data_dir=data_dir,
+        max_length=args.max_length,
+        num_hard_negatives=n_hard_negatives,
+    )
+    for label, metrics in extra_dev_results.items():
+        print(
+            f"{label} | MRR@10: {metrics['MRR@10']:.4f} | "
+            f"NDCG@10: {metrics['NDCG@10']:.4f} | P@10: {metrics['P@10']:.4f} | "
+            f"R@100: {metrics['R@100']:.4f}"
+        )
+
     if best_mrr10 >= 0.70:
         print("PHASE 2 GATE CLEARED. PROCEED TO PHASE 3.")
     else:
