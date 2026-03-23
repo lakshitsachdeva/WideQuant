@@ -30,6 +30,7 @@ from src.encoding.cqe_wrapper import (
     CQEWrapper,
     QuantitySpan,
     no_numbers_in_text,
+    reconstruct_spans_from_num_tokens,
     replace_with_num_tokens_regex,
 )
 
@@ -471,8 +472,8 @@ def _prepare_split_rows(
             continue
 
         if skip_cqe:
-            query_spans: list[QuantitySpan] = []
-            pos_spans: list[QuantitySpan] = []
+            query_spans = reconstruct_spans_from_num_tokens(question)
+            pos_spans = reconstruct_spans_from_num_tokens(context)
             query_text = _fast_replace_numbers(question)
             pos_doc_text = _fast_replace_numbers(context)
         else:

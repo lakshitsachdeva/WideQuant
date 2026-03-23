@@ -18,6 +18,7 @@ REGEX_NUM_REPLACEMENT_PATTERN = re.compile(
     r"\b\d+(?:\.\d+)?(?:%|billion|million|thousand)?\b",
     flags=re.IGNORECASE,
 )
+RECONSTRUCT_NUMBER_PATTERN = re.compile(r"\b(\d+(?:\.\d+)?)\b")
 
 
 def setup_tokenizer(
@@ -68,6 +69,48 @@ class QuantitySpan:
     concept: str
     start_char: int
     end_char: int
+
+
+def reconstruct_spans_from_num_tokens(
+    text: str,
+    tokenizer: Any | None = None,
+    num_token_id: int | None = None,
+) -> list[QuantitySpan]:
+    """Reconstruct lightweight QuantitySpans directly from numeric literals in raw text.
+
+    The tokenizer and num_token_id arguments are accepted for compatibility with
+    training/data-pipeline callers, but the reconstruction itself works from the
+    original text before `[num]` replacement.
+    """
+    _ = (tokenizer, num_token_id)
+    spans: list[QuantitySpan] = []
+    for match in RECONSTRUCT_NUMBER_PATTERN.finditer(text):
+        raw_value = match.group(1)
+        try:
+            value = float(raw_value)
+        except ValueError:
+            continue
+
+        if value > 0.0:
+            exponent = int(math.floor(math.log10(value)))
+            mantissa = float(value / (10**exponent))
+        else:
+            exponent = 0
+            mantissa = 0.0
+        mantissa = max(-10.0, min(10.0, mantissa))
+
+        spans.append(
+            QuantitySpan(
+                text=raw_value,
+                mantissa=mantissa,
+                exponent=exponent,
+                unit="UNK",
+                concept="UNK",
+                start_char=int(match.start(1)),
+                end_char=int(match.end(1)),
+            )
+        )
+    return spans
 
 
 @dataclass(slots=True)

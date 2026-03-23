@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.encoding.cqe_wrapper import no_numbers_in_text, replace_with_num_tokens_regex
+from src.encoding.cqe_wrapper import QuantitySpan, no_numbers_in_text, reconstruct_spans_from_num_tokens, replace_with_num_tokens_regex
 
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?", flags=re.IGNORECASE)
 
@@ -58,6 +58,19 @@ def _save_jsonl(rows: Iterable[dict[str, Any]], path: Path) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=True) + "\n")
+
+
+def _span_to_json(span: QuantitySpan) -> dict[str, Any]:
+    """Serialize a QuantitySpan for JSONL output."""
+    return {
+        "text": span.text,
+        "mantissa": float(span.mantissa),
+        "exponent": int(span.exponent),
+        "unit": span.unit,
+        "concept": span.concept,
+        "start_char": int(span.start_char),
+        "end_char": int(span.end_char),
+    }
 
 
 def _bm25_mrr_at_10(triples: Sequence[dict[str, Any]], sample_size: int = 100, seed: int = 42) -> float:
@@ -247,10 +260,11 @@ def _prepare_rows(dataset: Dataset) -> list[dict[str, Any]]:
             {
                 "source_id": f"msmarco:{idx}",
                 "query_text": query_text,
-                "query_spans": [],
+                "query_spans": [_span_to_json(span) for span in reconstruct_spans_from_num_tokens(query)],
                 "pos_doc_text": pos_doc_text,
-                "pos_doc_spans": [],
+                "pos_doc_spans": [_span_to_json(span) for span in reconstruct_spans_from_num_tokens(positive)],
                 "original_negative": neg_doc_text,
+                "original_negative_spans": [_span_to_json(span) for span in reconstruct_spans_from_num_tokens(negative)],
             }
         )
     return prepared
@@ -282,17 +296,24 @@ def _materialize_triples(
 ) -> list[dict[str, Any]]:
     """Attach the original negative plus six mined BM25 negatives."""
     mined_negatives = _mine_bm25_negatives(prepared_rows, candidate_rows, num_extra_negatives=6)
+    candidate_span_map = {
+        str(item["pos_doc_text"]): list(item.get("pos_doc_spans", []))
+        for item in candidate_rows
+    }
     triples: list[dict[str, Any]] = []
     for row, extra_negatives in zip(prepared_rows, mined_negatives):
         negative_texts = [str(row["original_negative"]), *[str(text) for text in extra_negatives]]
+        negative_spans = [list(row.get("original_negative_spans", []))]
+        for text in extra_negatives:
+            negative_spans.append(list(candidate_span_map.get(str(text), [])))
         triples.append(
             {
                 "query_text": str(row["query_text"]),
-                "query_spans": [],
+                "query_spans": list(row["query_spans"]),
                 "pos_doc_text": str(row["pos_doc_text"]),
-                "pos_doc_spans": [],
+                "pos_doc_spans": list(row["pos_doc_spans"]),
                 "neg_doc_texts": negative_texts,
-                "neg_doc_spans": [[] for _ in negative_texts],
+                "neg_doc_spans": negative_spans,
             }
         )
     return triples
@@ -307,16 +328,22 @@ def verify(triples: Sequence[dict[str, Any]], seed: int = 42) -> dict[str, float
             "total_triples": 0.0,
             "pct_query_has_num": 0.0,
             "pct_pos_has_num": 0.0,
+            "mean_query_spans": 0.0,
+            "mean_pos_doc_spans": 0.0,
             "bm25_mrr10_dev_100": 0.0,
         }
 
     pct_query_has_num = 100.0 * sum("[num]" in row["query_text"] for row in triples) / float(total)
     pct_pos_has_num = 100.0 * sum("[num]" in row["pos_doc_text"] for row in triples) / float(total)
+    mean_query_spans = sum(len(row.get("query_spans", [])) for row in triples) / float(total)
+    mean_pos_doc_spans = sum(len(row.get("pos_doc_spans", [])) for row in triples) / float(total)
     bm25_mrr = _bm25_mrr_at_10(triples, sample_size=min(100, total), seed=seed)
 
     print(f"Total triples: {total}")
     print(f"% of queries containing [num]: {pct_query_has_num:.2f}")
     print(f"% of positive docs containing [num]: {pct_pos_has_num:.2f}")
+    print(f"Mean query spans: {mean_query_spans:.2f}")
+    print(f"Mean positive-doc spans: {mean_pos_doc_spans:.2f}")
     print(f"BM25 MRR@10 on dev hard negatives: {bm25_mrr:.4f}")
 
     sample_count = min(3, total)
@@ -332,6 +359,8 @@ def verify(triples: Sequence[dict[str, Any]], seed: int = 42) -> dict[str, float
         "total_triples": float(total),
         "pct_query_has_num": float(pct_query_has_num),
         "pct_pos_has_num": float(pct_pos_has_num),
+        "mean_query_spans": float(mean_query_spans),
+        "mean_pos_doc_spans": float(mean_pos_doc_spans),
         "bm25_mrr10_dev_100": float(bm25_mrr),
     }
 
