@@ -650,7 +650,7 @@ def _load_existing_prepared_rows(path: Path, split_name: str) -> list[dict[str, 
 def remine_saved_splits(
     output_dir: str = "data/finquant",
     seed: int = 42,
-    n_negatives: int = 5,
+    n_negatives: int = 7,
 ) -> dict[str, int]:
     """Reload existing processed texts and rebuild only the hard negatives."""
     output_path = Path(output_dir)
@@ -703,7 +703,7 @@ def remine_saved_splits(
 def build_and_save_splits(
     output_dir: str = "data/finquant",
     seed: int = 42,
-    n_negatives: int = 5,
+    n_negatives: int = 7,
     max_examples: int | None = None,
     skip_cqe: bool = False,
     streaming: bool = False,
@@ -834,7 +834,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build retrieval triples from FLARE-FinQA")
     parser.add_argument("--output_dir", type=str, default="data/finquant")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--n_negatives", type=int, default=5)
+    parser.add_argument("--n_negatives", type=int, default=7)
     parser.add_argument("--max_examples", type=int, default=None)
     parser.add_argument("--skip_cqe", action="store_true")
     parser.add_argument("--streaming", action="store_true")

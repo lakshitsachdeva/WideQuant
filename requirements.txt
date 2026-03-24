@@ -1,8 +1,7 @@
 torch>=2.0.0
 transformers>=4.35.0
-# FAISS: prefer GPU on Linux; fallback to CPU on other platforms.
-faiss-gpu; platform_system == "Linux"
-faiss-cpu; platform_system != "Linux"
+# Portable default. Kaggle does not provide a pip-installable faiss-gpu wheel.
+faiss-cpu
 scikit-learn
 rank-bm25
 pint

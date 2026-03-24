@@ -118,6 +118,19 @@ class DeepQuant(nn.Module):
         return spans
 
     @staticmethod
+    def _placeholder_span() -> QuantitySpan:
+        """Create a generic placeholder span when metadata is missing."""
+        return QuantitySpan(
+            text="[num]",
+            mantissa=0.0,
+            exponent=0,
+            unit="",
+            concept="",
+            start_char=0,
+            end_char=0,
+        )
+
+    @staticmethod
     def _span_key(span: QuantitySpan, idx: int) -> tuple[Any, ...]:
         """Create a stable dictionary key for quantity span outputs."""
         return (
@@ -143,19 +156,15 @@ class DeepQuant(nn.Module):
 
         spans = self._coerce_spans(quantity_spans)
         num_positions = (input_ids[0] == self.num_token_id).nonzero(as_tuple=False).flatten()
-        if not spans and int(num_positions.numel()) > 0:
-            spans = [
-                QuantitySpan(
-                    text="[num]",
-                    mantissa=0.0,
-                    exponent=0,
-                    unit="",
-                    concept="",
-                    start_char=0,
-                    end_char=0,
-                )
-                for _ in range(int(num_positions.numel()))
-            ]
+        num_count = int(num_positions.numel())
+        if not spans and num_count > 0:
+            spans = [self._placeholder_span() for _ in range(num_count)]
+        elif len(spans) > num_count:
+            # Text is tokenized with truncation, so keep only spans that survive in the
+            # truncated sequence. Numeric mentions appear in left-to-right order.
+            spans = spans[:num_count]
+        elif len(spans) < num_count:
+            spans = spans + [self._placeholder_span() for _ in range(num_count - len(spans))]
         modified_embeddings = self.quantity_injector(input_ids=input_ids, quantity_spans=spans)
 
         outputs = self.bert(
@@ -167,9 +176,9 @@ class DeepQuant(nn.Module):
         token_embeddings = outputs.last_hidden_state[0].to(dtype=torch.float32)  # (seq_len, 768)
         cls_embedding = token_embeddings[0]  # (768,)
 
-        if len(spans) != int(num_positions.numel()):
+        if len(spans) != num_count:
             raise ValueError(
-                f"Found {int(num_positions.numel())} [num] tokens but received {len(spans)} quantity spans."
+                f"Found {num_count} [num] tokens but received {len(spans)} quantity spans."
             )
 
         quantity_outputs: dict[tuple[Any, ...], Tensor] = {}
