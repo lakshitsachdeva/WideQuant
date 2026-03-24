@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 
@@ -20,7 +23,10 @@ class TwoLayerFFN(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply two-layer feed-forward projection."""
-        return self.net(x.to(dtype=torch.float32))
+        device_type = x.device.type
+        ctx = torch.autocast(device_type=device_type, enabled=False) if device_type in {"cuda", "cpu"} else nullcontext()
+        with ctx:
+            return self.net(x.to(dtype=torch.float32)).to(dtype=torch.float32)
 
 
 class ComparatorPredictor(nn.Module):
@@ -33,7 +39,7 @@ class ComparatorPredictor(nn.Module):
 
     def forward(self, y_a: torch.Tensor) -> torch.Tensor:
         """Return softmax probabilities over comparator classes, shape (batch, 3)."""
-        logits = self.predictor(y_a)
+        logits = self.predictor(y_a).to(dtype=torch.float32)
         return torch.softmax(logits, dim=-1)
 
 
@@ -52,9 +58,9 @@ class UnitCompatibilityScorer(nn.Module):
         if y_b_set.ndim != 2:
             raise ValueError("y_b_set must have shape (N_docs, J).")
 
-        u_a = self.N_u(y_a).reshape(-1)
-        u_b_set = self.N_u(y_b_set)
-        scores = torch.matmul(u_b_set, u_a)
+        u_a = F.normalize(self.N_u(y_a).reshape(-1), p=2, dim=0, eps=1e-6)
+        u_b_set = F.normalize(self.N_u(y_b_set), p=2, dim=-1, eps=1e-6)
+        scores = torch.matmul(u_b_set, u_a).clamp(min=-1.0, max=1.0)
         return torch.softmax(scores, dim=0)
 
 
@@ -74,13 +80,13 @@ class ComparatorPairScorer(nn.Module):
 
     def precompute_doc_side(self, y_b: torch.Tensor) -> torch.Tensor:
         """Precompute document-side representations for ANN indexing."""
-        return self.N_op_d(y_b)
+        return F.normalize(self.N_op_d(y_b), p=2, dim=-1, eps=1e-6)
 
     def forward(self, y_a: torch.Tensor, y_b: torch.Tensor) -> torch.Tensor:
         """Return scalar dot product N_op_q(y_a) · N_op_d(y_b)."""
-        q_vec = self.N_op_q(y_a).reshape(-1)
-        d_vec = self.N_op_d(y_b).reshape(-1)
-        return torch.dot(q_vec, d_vec)
+        q_vec = F.normalize(self.N_op_q(y_a).reshape(-1), p=2, dim=0, eps=1e-6)
+        d_vec = F.normalize(self.N_op_d(y_b).reshape(-1), p=2, dim=0, eps=1e-6)
+        return torch.dot(q_vec, d_vec).clamp(min=-1.0, max=1.0)
 
 
 class RegularizationLoss:

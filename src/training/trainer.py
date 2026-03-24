@@ -386,6 +386,30 @@ class DeepQuantTrainer:
                     print(f"  pos_scores == neg_scores allclose: {torch.allclose(pos_vec.unsqueeze(1), neg_vec)}")
                     self._did_infonce_debug = True
                 loss_dict = self.loss_fn(loss_inputs)
+                nonfinite_losses = {
+                    key: value
+                    for key, value in loss_dict.items()
+                    if isinstance(value, Tensor) and not torch.isfinite(value).all()
+                }
+                if nonfinite_losses:
+                    print("CRITICAL: Non-finite loss detected.")
+                    for key, value in nonfinite_losses.items():
+                        print(f"  {key}: {value}")
+                    for key in [
+                        "pos_scores",
+                        "neg_scores",
+                        "N_lt_scores",
+                        "N_eq_scores",
+                        "N_gt_scores",
+                        "resolved_candidate_scores",
+                    ]:
+                        tensor = loss_inputs.get(key)
+                        if isinstance(tensor, Tensor):
+                            finite = bool(torch.isfinite(tensor).all().item())
+                            min_value = float(torch.nan_to_num(tensor.detach(), nan=0.0).min().item())
+                            max_value = float(torch.nan_to_num(tensor.detach(), nan=0.0).max().item())
+                            print(f"  {key}: finite={finite} range=[{min_value:.4f}, {max_value:.4f}]")
+                    raise RuntimeError("Encountered non-finite loss during training.")
                 scaled_loss = loss_dict["total"] / float(self.gradient_accumulation_steps)
 
             self.scaler.scale(scaled_loss).backward()
